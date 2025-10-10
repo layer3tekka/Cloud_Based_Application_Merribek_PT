@@ -1,9 +1,8 @@
 {
-  "name": "merribek-gtfs-proxy",
-  "version": "1.0.0",
+  "name": "vic-gtfs-proxy",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=18" },
+  "engines": { "node": "18.x" },
   "dependencies": {
     "gtfs-realtime-bindings": "1.1.1"
   }
