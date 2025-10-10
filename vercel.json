@@ -1,0 +1,6 @@
+{
+  "version": 2,
+  "functions": {
+    "api/gtfs/[mode]/trip-updates.js": { "runtime": "nodejs18.x" }
+  }
+}
