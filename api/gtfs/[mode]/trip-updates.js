@@ -1,15 +1,11 @@
 // api/gtfs/[mode]/trip-updates.js
 import fetch from "node-fetch";
-import * as Gtfs from "gtfs-realtime-bindings";
+import { transit_realtime as tr } from "gtfs-realtime-bindings";
 
-// ✅ Vercel wants plain "nodejs" here (or omit config entirely)
 export const config = { runtime: "nodejs" };
 
-const FEED_SEGMENT = {
-  tram: "tram",
-  bus: "bus",
-  train: "metro", // PTV calls trains "metro"
-};
+// Map our URL segment to PTV’s path segment
+const FEED_SEGMENT = { tram: "tram", bus: "bus", train: "metro" };
 
 function getMode(req) {
   const seg =
@@ -27,40 +23,70 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
 
   const mode = getMode(req);
-  if (!mode) return res.status(400).json({ ok: false, error: "Invalid mode. Use tram | bus | train" });
+  if (!mode) {
+    return res.status(400).json({ ok: false, error: "Invalid mode. Use tram | bus | train" });
+  }
 
-  const key = process.env.PTV_KEY; // set in Vercel → Project → Settings → Environment Variables
-  if (!key) return res.status(500).json({ ok: false, error: "Missing PTV_KEY env var" });
+  const key = process.env.PTV_KEY;
+  if (!key) {
+    return res.status(500).json({ ok: false, error: "Missing PTV_KEY env var" });
+  }
 
+  // Some docs show KeyId, others Ocp-Apim-Subscription-Key. Allow either via env.
+  const headerName = process.env.PTV_HEADER || "KeyId";
   const url = `https://api.opendata.transport.vic.gov.au/opendata/public-transport/gtfs/realtime/v1/${FEED_SEGMENT[mode]}/trip-updates`;
 
   try {
-    const r = await fetch(url, {
-      headers: {
-        // Your portal shows `KeyId`. (If needed, try Ocp-Apim-Subscription-Key instead.)
-        KeyId: key,
-        Accept: "*/*",
-      },
+    const resp = await fetch(url, {
+      headers: { [headerName]: key, Accept: "*/*" },
     });
 
-    if (!r.ok) {
-      const text = await r.text().catch(() => "");
-      return res.status(r.status).json({
-        ok: false, up: false, status: r.status, body: text.slice(0, 300)
+    // If upstream says no, surface the status and a short body excerpt
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      return res.status(resp.status).json({
+        ok: false,
+        upstreamStatus: resp.status,
+        upstreamCT: resp.headers.get("content-type"),
+        bodyPreview: text.slice(0, 400),
+        hint: "If 401/403, try setting env PTV_HEADER=Ocp-Apim-Subscription-Key",
       });
     }
 
-    const buf = Buffer.from(await r.arrayBuffer());
-    const msg = Gtfs.FeedMessage.decode(buf);
-    const plain = Gtfs.FeedMessage.toObject(msg, { longs: Number, enums: String, defaults: true });
+    const buf = Buffer.from(await resp.arrayBuffer());
+
+    // decode the protobuf; if it fails, return a helpful error instead of 500
+    let msg;
+    try {
+      msg = tr.FeedMessage.decode(buf);
+    } catch (e) {
+      return res.status(502).json({
+        ok: false,
+        error: "DECODE_FAILED",
+        message: e?.message || String(e),
+        contentType: resp.headers.get("content-type"),
+        byteLength: buf.length,
+      });
+    }
+
+    const obj = tr.FeedMessage.toObject(msg, {
+      longs: Number,
+      enums: String,
+      defaults: true,
+    });
 
     return res.status(200).json({
       ok: true,
       mode,
-      entityCount: plain.entity?.length || 0,
-      entities: plain.entity || [],
+      entityCount: obj.entity?.length || 0,
+      // send only a small sample to keep payload light
+      sample: (obj.entity || []).slice(0, 3),
     });
   } catch (err) {
-    return res.status(500).json({ ok: false, error: "Fetch/decode failed", message: err?.message || String(err) });
+    return res.status(500).json({
+      ok: false,
+      error: "FETCH_FAILED",
+      message: err?.message || String(err),
+    });
   }
 }
