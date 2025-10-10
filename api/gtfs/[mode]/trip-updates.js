@@ -1,5 +1,6 @@
-// No node-fetch import needed on Node 18+ / Vercel
-import { transit_realtime as tr } from "gtfs-realtime-bindings";
+// ESM-friendly import for a CommonJS module:
+import gtfs from "gtfs-realtime-bindings";
+const { transit_realtime: tr } = gtfs;
 
 export const config = { runtime: "nodejs" };
 
@@ -27,7 +28,9 @@ export default async function handler(req, res) {
   const key = process.env.PTV_KEY;
   if (!key) return res.status(500).json({ ok: false, error: "Missing PTV_KEY env var" });
 
-  const headerName = process.env.PTV_HEADER || "KeyId"; // try "Ocp-Apim-Subscription-Key" if needed
+  // Use your working header name. If 401/403 occurs, try "Ocp-Apim-Subscription-Key"
+  const headerName = process.env.PTV_HEADER || "KeyId";
+
   const url = `https://api.opendata.transport.vic.gov.au/opendata/public-transport/gtfs/realtime/v1/${FEED_SEGMENT[mode]}/trip-updates`;
 
   try {
