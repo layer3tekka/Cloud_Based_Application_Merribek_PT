@@ -2,11 +2,12 @@
   "name": "vic-gtfs-proxy",
   "private": true,
   "type": "module",
-  "engines": { "node": "18.x" },
+  "engines": { "node": "22.x" },
   "dependencies": {
     "gtfs-realtime-bindings": "1.1.1"
   }
 }
+
 
 
 
