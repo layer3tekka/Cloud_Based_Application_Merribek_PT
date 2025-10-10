@@ -1,1 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GTFS Realtime Proxy – Smoke Test</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;max-width:900px}
+    h1{margin:0 0 12px}
+    .row{margin:8px 0;display:flex;gap:8px;align-items:center}
+    button{padding:6px 10px;cursor:pointer}
+    pre{background:#111;color:#eee;padding:12px;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:50vh;overflow:auto}
+    .ok{color:#0a0}
+    .bad{color:#b00}
+    code{background:#f3f3f3;padding:2px 4px;border-radius:4px}
+  </style>
+</head>
+<body>
+  <h1>GTFS Realtime Proxy – Smoke Test</h1>
+  <p>
+    This page calls your Vercel serverless routes:
+    <code>/api/gtfs/tram/trip-updates</code>,
+    <code>/api/gtfs/bus/trip-updates</code>,
+    <code>/api/gtfs/train/trip-updates</code>.
+  </p>
+
+  <div class="row">
+    <button data-mode="tram">Fetch TRAM</button>
+    <button data-mode="bus">Fetch BUS</button>
+    <button data-mode="train">Fetch TRAIN</button>
+    <span id="status"></span>
+  </div>
+
+  <pre id="out">Click a button above…</pre>
+
+<script>
+async function call(mode){
+  const status = document.getElementById('status');
+  const out = document.getElementById('out');
+  status.textContent = `Loading ${mode}…`;
+  status.className = '';
+  out.textContent = '';
+
+  try{
+    const res = await fetch(`/api/gtfs/${mode}/trip-updates`, { cache: 'no-store' });
+    const text = await res.text();
+    status.textContent = `${res.status} ${res.statusText}`;
+    status.className = res.ok ? 'ok' : 'bad';
+
+    // Try pretty JSON, else raw text
+    try { out.textContent = JSON.stringify(JSON.parse(text), null, 2); }
+    catch { out.textContent = text; }
+  }catch(err){
+    status.textContent = 'Network error';
+    status.className = 'bad';
+    out.textContent = String(err);
+  }
+}
+document.querySelectorAll('button[data-mode]').forEach(b=>{
+  b.addEventListener('click', ()=>call(b.dataset.mode));
+});
+</script>
+</body>
+</html>
 
