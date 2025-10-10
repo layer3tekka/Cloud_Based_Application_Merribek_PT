@@ -1,57 +1,80 @@
-import crypto from "node:crypto";
 import { transit_realtime as tr } from "gtfs-realtime-bindings";
 
-const PTV_BASE = "https://timetableapi.ptv.v3";
-const MODE_MAP = { train: 0, tram: 1, bus: 2 };
+const MODE_URL = {
+  tram:  process.env.TRAM_FEED_URL  || "",
+  bus:   process.env.BUS_FEED_URL   || "",
+  train: process.env.TRAIN_FEED_URL || ""
+};
 
-function cors(res) {
+function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-function signPath(path, key) {
-  // HMAC-SHA1 of the URL path (including ?devid=...)
-  return crypto.createHmac("sha1", key).update(path).digest("hex");
+function buildUrlFor(mode) {
+  return MODE_URL[mode] || "";
+}
+
+async function fetchProto(url) {
+  const opts = {};
+  if (process.env.AUTH_MODE === "header" && process.env.AUTH_KEY && process.env.AUTH_HEADER) {
+    opts.headers = { [process.env.AUTH_HEADER]: process.env.AUTH_KEY };
+  }
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(`Upstream ${r.status} ${r.statusText}`);
+  const buf = Buffer.from(await r.arrayBuffer());
+  return tr.FeedMessage.decode(buf);
+}
+
+function normalize(feed) {
+  const out = [];
+  for (const ent of feed.entity || []) {
+    const tu = ent.tripUpdate;
+    const ve = ent.vehicle;
+
+    let firstStop = null;
+    if (tu?.stopTimeUpdate?.length) {
+      const s = tu.stopTimeUpdate[0];
+      const delay = s.arrival?.delay ?? s.departure?.delay ?? null;
+      firstStop = {
+        stopId: s.stopId ?? null,
+        arrivalDelay: s.arrival?.delay ?? null,
+        departureDelay: s.departure?.delay ?? null,
+        delaySeconds: delay
+      };
+    }
+
+    out.push({
+      id: ent.id ?? null,
+      timestamp: feed.header?.timestamp?.low ?? null,
+      trip: {
+        trip_id: tu?.trip?.tripId ?? ve?.trip?.tripId ?? null,
+        route_id: tu?.trip?.routeId ?? ve?.trip?.routeId ?? null
+      },
+      firstStop
+    });
+  }
+  return { entities: out };
 }
 
 export default async function handler(req, res) {
-  cors(res);
+  setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
-
   try {
-    const { mode } = req.query;
-    const routeType = MODE_MAP[mode?.toLowerCase()];
-    if (routeType === undefined) {
-      return res.status(400).json({ error: "mode must be train|tram|bus" });
+    const mode = (req.query.mode || "").toString().toLowerCase();
+    if (!["tram","bus","train"].includes(mode)) {
+      return res.status(400).json({ error: "mode must be tram|bus|train" });
     }
+    const url = buildUrlFor(mode);
+    if (!url) return res.status(500).json({ error: `No feed URL for ${mode}` });
 
-    const DEV_ID = process.env.PTV_DEVID;
-    const HMAC_KEY = process.env.PTV_HMAC_KEY;
-    if (!DEV_ID || !HMAC_KEY) {
-      return res.status(500).json({ error: "Server is missing PTV credentials" });
-    }
-
-    // Build path with devid FIRST, then sign it
-    const path = `/gtfs/trip_updates?route_types=${routeType}&devid=${DEV_ID}`;
-    const signature = signPath(path, HMAC_KEY);
-    const url = `${PTV_BASE}${path}&signature=${signature}`;
-
-    const r = await fetch(url, { cache: "no-store" });
-    if (!r.ok) {
-      const text = await r.text();
-      return res.status(r.status).json({ error: "PTV fetch failed", details: text });
-    }
-
-    // Decode protobuf -> JSON
-    const buf = new Uint8Array(await r.arrayBuffer());
-    const feed = tr.FeedMessage.decode(buf);
-    const json = tr.FeedMessage.toObject(feed, { longs: String, enums: String });
-
-    // Your front-end expects { entities: [...] } shape
-    return res.status(200).json({ entities: json.entity || [] });
+    const feed = await fetchProto(url);
+    const json = normalize(feed);
+    res.setHeader("Content-Type", "application/json");
+    return res.status(200).send(JSON.stringify(json));
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ error: "Proxy error", details: String(err) });
+    return res.status(502).json({ error: "Upstream fetch failed" });
   }
 }
