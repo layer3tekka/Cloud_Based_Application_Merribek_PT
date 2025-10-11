@@ -1,130 +1,74 @@
-// pages/api/gtfs/[mode]/trip-updates.js
-export const config = { runtime: 'nodejs' }; // force Node (not Edge)
+// ESM-friendly import for a CommonJS module:
+import gtfs from "gtfs-realtime-bindings";
+const { transit_realtime: tr } = gtfs;
 
-function cors(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-}
-function send(res, code, body) {
-  cors(res);
-  res.status(code).json(body);
-}
+export const config = { runtime: "nodejs" };
 
-async function loadProto() {
-  // ESM-friendly dynamic import
-  const mod = await import('gtfs-realtime-bindings');
-  // CJS default interop safety:
-  return mod.transit_realtime || mod.default?.transit_realtime;
+// map url segment to PTV segment
+const FEED_SEGMENT = { tram: "tram", bus: "bus", train: "metro" };
+
+function getMode(req) {
+  const seg =
+    req.query?.mode ||
+    new URL(req.url, `http://${req.headers.host}`).pathname.split("/")[3];
+  const key = String(seg || "").toLowerCase();
+  return FEED_SEGMENT[key] ? key : null;
 }
 
 export default async function handler(req, res) {
-  if (req.method === 'OPTIONS') return send(res, 204, {});
+  // CORS
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.status(200).end();
 
-  const debug = req.query.debug === '1';
-  const mode = req.query?.mode;
-  if (!mode || !['tram', 'bus', 'train'].includes(mode)) {
-    return send(res, 400, { ok: false, error: 'Missing/invalid `mode` (tram|bus|train)' });
-  }
-
-  const base =
-    'https://api.opendata.transport.vic.gov.au/opendata/public-transport/gtfs/realtime/v1';
-  const path =
-    mode === 'tram'  ? 'yarratrams/trip-updates' :
-    mode === 'bus'   ? 'bus/trip-updates'       :
-                       'metro/trip-updates'; // train
+  const mode = getMode(req);
+  if (!mode) return res.status(400).json({ ok: false, error: "Invalid mode. Use tram|bus|train" });
 
   const key = process.env.PTV_KEY;
-  if (!key) return send(res, 500, { ok: false, error: 'Missing PTV_KEY env var' });
+  if (!key) return res.status(500).json({ ok: false, error: "Missing PTV_KEY env var" });
 
-  const url = `${base}/${path}`;
+  // Use your working header name. If 401/403 occurs, try "Ocp-Apim-Subscription-Key"
+  const headerName = process.env.PTV_HEADER || "KeyId";
+
+  const url = `https://api.opendata.transport.vic.gov.au/opendata/public-transport/gtfs/realtime/v1/${FEED_SEGMENT[mode]}/trip-updates`;
 
   try {
-    // fetch with timeout
-    const ac = new AbortController();
-    const tid = setTimeout(() => ac.abort(), 15000);
-    const r = await fetch(url, {
-      headers: { 'Ocp-Apim-Subscription-Key': key },
-      signal: ac.signal
-    });
-    clearTimeout(tid);
+    const resp = await fetch(url, { headers: { [headerName]: key, Accept: "*/*" } });
 
-    if (!r.ok) {
-      const upstreamBody = (await r.text().catch(() => '')).slice(0, 500);
-      return send(res, r.status, { ok: false, error: `Upstream ${r.status}`, upstreamBody });
-    }
-
-    const tr = await loadProto(); // protobuf schema
-    if (!tr) return send(res, 500, { ok: false, error: 'gtfs-realtime-bindings unavailable' });
-
-    const buf = Buffer.from(await r.arrayBuffer());
-    const feed = tr.FeedMessage.decode(buf);
-
-    const entities = (feed.entity || []).map((e) => {
-      const tu = e.tripUpdate;
-
-      const stopTimeUpdate = (tu?.stopTimeUpdate || []).map((u) => ({
-        stopSequence: u.stopSequence ?? null,
-        stopId: u.stopId ? String(u.stopId) : null,
-        arrival: {
-          delay: u.arrival?.delay ?? 0,
-          time: Number(u.arrival?.time ?? 0),
-          uncertainty: u.arrival?.uncertainty ?? 0,
-        },
-        departure: {
-          delay: u.departure?.delay ?? 0,
-          time: Number(u.departure?.time ?? 0),
-          uncertainty: u.departure?.uncertainty ?? 0,
-        },
-        scheduleRelationship: u.scheduleRelationship ?? 'SCHEDULED',
-      }));
-
-      return {
-        id: e.id,
-        isDeleted: !!e.isDeleted,
-        tripUpdate: {
-          stopTimeUpdate,
-          trip: {
-            tripId: tu?.trip?.tripId ?? null,
-            startTime: tu?.trip?.startTime ?? null,
-            startDate: tu?.trip?.startDate ?? null,
-            scheduleRelationship: tu?.trip?.scheduleRelationship ?? 'SCHEDULED',
-            routeId: tu?.trip?.routeId ?? null,
-            directionId: tu?.trip?.directionId ?? null,
-          },
-          vehicle: tu?.vehicle ?? null,
-          timestamp: Number(tu?.timestamp ?? 0),
-          delay: tu?.delay ?? 0,
-          tripProperties: tu?.tripProperties ?? null,
-        },
-        vehicle: e.vehicle ?? null,
-        alert: e.alert ?? null,
-        firstStop: (() => {
-          const u = stopTimeUpdate[0];
-          if (!u) return null;
-          return {
-            stopId: u.stopId,
-            arrivalDelay: u.arrival?.delay ?? 0,
-            departureDelay: u.departure?.delay ?? 0,
-          };
-        })(),
-      };
-    });
-
-    res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
-
-    if (debug) {
-      return send(res, 200, {
-        ok: true,
-        mode,
-        entityCount: entities.length,
-        url,
-        sampleIds: entities.slice(0, 5).map((x) => x.id),
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      return res.status(resp.status).json({
+        ok: false,
+        upstreamStatus: resp.status,
+        upstreamCT: resp.headers.get("content-type"),
+        bodyPreview: text.slice(0, 400),
+        hint: "If 401/403, set env PTV_HEADER=Ocp-Apim-Subscription-Key and redeploy."
       });
     }
 
-    return send(res, 200, { ok: true, mode, entityCount: entities.length, entities });
+    const buf = Buffer.from(await resp.arrayBuffer());
+    let msg;
+    try {
+      msg = tr.FeedMessage.decode(buf);
+    } catch (e) {
+      return res.status(502).json({
+        ok: false,
+        error: "DECODE_FAILED",
+        message: e?.message || String(e),
+        contentType: resp.headers.get("content-type"),
+        byteLength: buf.length
+      });
+    }
+
+    const obj = tr.FeedMessage.toObject(msg, { longs: Number, enums: String, defaults: true });
+    return res.status(200).json({
+      ok: true,
+      mode,
+      entityCount: obj.entity?.length || 0,
+      sample: (obj.entity || []).slice(0, 3)
+    });
   } catch (err) {
-    return send(res, 500, { ok: false, error: String(err?.message || err) });
+    return res.status(500).json({ ok: false, error: "FETCH_FAILED", message: err?.message || String(err) });
   }
 }
