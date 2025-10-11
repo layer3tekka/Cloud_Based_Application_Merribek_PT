@@ -1,43 +1,52 @@
-// api/gtfs/[mode]/trip-updates.js
-import fetch from 'node-fetch';
-import pkg from 'gtfs-realtime-bindings';
-const { transit_realtime: tr } = pkg;
+// pages/api/gtfs/[mode]/trip-updates.js
+
+// Force Node runtime (NOT Edge), so gtfs-realtime-bindings can load
+export const config = { runtime: 'nodejs20.x' };
+
+// Use CJS for this package to avoid ESM/Edge headaches
+const { transit_realtime: tr } = require('gtfs-realtime-bindings');
 
 export default async function handler(req, res) {
   try {
-    const mode =
-      req.query?.mode ||
-      new URL(req.url, `http://${req.headers.host}`).pathname.split("/")[3];
+    // mode: "tram" | "bus" | "train"
+    const mode = req.query?.mode;
+    if (!mode) return res.status(400).json({ ok: false, error: 'Missing mode' });
 
     const base = 'https://api.opendata.transport.vic.gov.au/opendata/public-transport/gtfs/realtime/v1';
-    const path = mode === 'tram'  ? 'yarratrams/trip-updates'
-               : mode === 'bus'   ? 'bus/trip-updates'
-               :                    'metro/trip-updates'; // train
+    const path =
+      mode === 'tram'  ? 'yarratrams/trip-updates' :
+      mode === 'bus'   ? 'bus/trip-updates'       :
+                         'metro/trip-updates'; // train
 
     const key = process.env.PTV_KEY;
-    if (!key) return res.status(500).json({ ok:false, error:'Missing PTV_KEY env var' });
+    if (!key) return res.status(500).json({ ok: false, error: 'Missing PTV_KEY env var' });
 
-    const r = await fetch(`${base}/${path}`, {
+    // Vercel Node 18/20 has global fetch
+    const upstream = await fetch(`${base}/${path}`, {
       headers: { 'Ocp-Apim-Subscription-Key': key }
     });
-    if (!r.ok) return res.status(r.status).json({ ok:false, error:`Upstream ${r.status}` });
 
-    const buf = await r.arrayBuffer();
-    const feed = tr.FeedMessage.decode(new Uint8Array(buf));
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({ ok: false, error: `Upstream ${upstream.status}` });
+    }
+
+    const arrBuf = await upstream.arrayBuffer();
+    const feed = tr.FeedMessage.decode(Buffer.from(arrBuf));
+
     const entities = (feed.entity || []).map(e => {
-      // make a small, JSON-friendly object the client can use without ProtoBufs
       const tu = e.tripUpdate;
+
       const stopTimeUpdate = (tu?.stopTimeUpdate || []).map(u => ({
-        stopSequence: u.stopSequence,
-        stopId: u.stopId?.toString(),
+        stopSequence: u.stopSequence ?? null,
+        stopId: u.stopId ? String(u.stopId) : null,
         arrival: {
           delay: u.arrival?.delay ?? 0,
-          time:  Number(u.arrival?.time ?? 0),
+          time: Number(u.arrival?.time ?? 0),
           uncertainty: u.arrival?.uncertainty ?? 0
         },
         departure: {
           delay: u.departure?.delay ?? 0,
-          time:  Number(u.departure?.time ?? 0),
+          time: Number(u.departure?.time ?? 0),
           uncertainty: u.departure?.uncertainty ?? 0
         },
         scheduleRelationship: u.scheduleRelationship ?? 'SCHEDULED'
@@ -49,11 +58,11 @@ export default async function handler(req, res) {
         tripUpdate: {
           stopTimeUpdate,
           trip: {
-            tripId: tu?.trip?.tripId,
-            startTime: tu?.trip?.startTime,
-            startDate: tu?.trip?.startDate,
+            tripId: tu?.trip?.tripId ?? null,
+            startTime: tu?.trip?.startTime ?? null,
+            startDate: tu?.trip?.startDate ?? null,
             scheduleRelationship: tu?.trip?.scheduleRelationship ?? 'SCHEDULED',
-            routeId: tu?.trip?.routeId,
+            routeId: tu?.trip?.routeId ?? null,
             directionId: tu?.trip?.directionId ?? null
           },
           vehicle: tu?.vehicle ?? null,
@@ -62,7 +71,18 @@ export default async function handler(req, res) {
           tripProperties: tu?.tripProperties ?? null
         },
         vehicle: e.vehicle ?? null,
-        alert: e.alert ?? null
+        alert: e.alert ?? null,
+
+        // helper fields the UI might use quickly
+        firstStop: (() => {
+          const u = stopTimeUpdate[0];
+          if (!u) return null;
+          return {
+            stopId: u.stopId,
+            arrivalDelay: u.arrival?.delay ?? 0,
+            departureDelay: u.departure?.delay ?? 0
+          };
+        })()
       };
     });
 
@@ -71,11 +91,11 @@ export default async function handler(req, res) {
       ok: true,
       mode,
       entityCount: entities.length,
-      entities,                      // <- full list for the app
-      sample: entities.slice(0, 3)   // <- short sample for your smoke-test page
+      entities,                    // FULL LIST – use this in your map/app
+      sample: entities.slice(0, 3) // small sample for your smoke test, if you like
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok:false, error:String(err?.message || err) });
+    console.error('trip-updates error:', err);
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 }
