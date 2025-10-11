@@ -1,18 +1,18 @@
 // pages/api/gtfs/[mode]/trip-updates.js
 
-// Force Node runtime (NOT Edge), so gtfs-realtime-bindings can load
-export const config = { runtime: 'nodejs20.x' };
+// IMPORTANT: force Node runtime (NOT Edge) so gtfs-realtime-bindings works
+export const config = { runtime: 'nodejs' };
 
-// Use CJS for this package to avoid ESM/Edge headaches
+// Use CJS require to avoid ESM bundling issues with this package
 const { transit_realtime: tr } = require('gtfs-realtime-bindings');
 
 export default async function handler(req, res) {
   try {
-    // mode: "tram" | "bus" | "train"
     const mode = req.query?.mode;
     if (!mode) return res.status(400).json({ ok: false, error: 'Missing mode' });
 
-    const base = 'https://api.opendata.transport.vic.gov.au/opendata/public-transport/gtfs/realtime/v1';
+    const base =
+      'https://api.opendata.transport.vic.gov.au/opendata/public-transport/gtfs/realtime/v1';
     const path =
       mode === 'tram'  ? 'yarratrams/trip-updates' :
       mode === 'bus'   ? 'bus/trip-updates'       :
@@ -21,35 +21,32 @@ export default async function handler(req, res) {
     const key = process.env.PTV_KEY;
     if (!key) return res.status(500).json({ ok: false, error: 'Missing PTV_KEY env var' });
 
-    // Vercel Node 18/20 has global fetch
-    const upstream = await fetch(`${base}/${path}`, {
-      headers: { 'Ocp-Apim-Subscription-Key': key }
+    const r = await fetch(`${base}/${path}`, {
+      headers: { 'Ocp-Apim-Subscription-Key': key },
     });
+    if (!r.ok) return res.status(r.status).json({ ok: false, error: `Upstream ${r.status}` });
 
-    if (!upstream.ok) {
-      return res.status(upstream.status).json({ ok: false, error: `Upstream ${upstream.status}` });
-    }
+    // Decode GTFS-RT protobuf
+    const buf = Buffer.from(await r.arrayBuffer());
+    const feed = tr.FeedMessage.decode(buf);
 
-    const arrBuf = await upstream.arrayBuffer();
-    const feed = tr.FeedMessage.decode(Buffer.from(arrBuf));
-
-    const entities = (feed.entity || []).map(e => {
+    const entities = (feed.entity || []).map((e) => {
       const tu = e.tripUpdate;
 
-      const stopTimeUpdate = (tu?.stopTimeUpdate || []).map(u => ({
+      const stopTimeUpdate = (tu?.stopTimeUpdate || []).map((u) => ({
         stopSequence: u.stopSequence ?? null,
         stopId: u.stopId ? String(u.stopId) : null,
         arrival: {
           delay: u.arrival?.delay ?? 0,
           time: Number(u.arrival?.time ?? 0),
-          uncertainty: u.arrival?.uncertainty ?? 0
+          uncertainty: u.arrival?.uncertainty ?? 0,
         },
         departure: {
           delay: u.departure?.delay ?? 0,
           time: Number(u.departure?.time ?? 0),
-          uncertainty: u.departure?.uncertainty ?? 0
+          uncertainty: u.departure?.uncertainty ?? 0,
         },
-        scheduleRelationship: u.scheduleRelationship ?? 'SCHEDULED'
+        scheduleRelationship: u.scheduleRelationship ?? 'SCHEDULED',
       }));
 
       return {
@@ -63,26 +60,26 @@ export default async function handler(req, res) {
             startDate: tu?.trip?.startDate ?? null,
             scheduleRelationship: tu?.trip?.scheduleRelationship ?? 'SCHEDULED',
             routeId: tu?.trip?.routeId ?? null,
-            directionId: tu?.trip?.directionId ?? null
+            directionId: tu?.trip?.directionId ?? null,
           },
           vehicle: tu?.vehicle ?? null,
           timestamp: Number(tu?.timestamp ?? 0),
           delay: tu?.delay ?? 0,
-          tripProperties: tu?.tripProperties ?? null
+          tripProperties: tu?.tripProperties ?? null,
         },
         vehicle: e.vehicle ?? null,
         alert: e.alert ?? null,
 
-        // helper fields the UI might use quickly
+        // convenience for the UI
         firstStop: (() => {
           const u = stopTimeUpdate[0];
           if (!u) return null;
           return {
             stopId: u.stopId,
             arrivalDelay: u.arrival?.delay ?? 0,
-            departureDelay: u.departure?.delay ?? 0
+            departureDelay: u.departure?.delay ?? 0,
           };
-        })()
+        })(),
       };
     });
 
@@ -91,8 +88,8 @@ export default async function handler(req, res) {
       ok: true,
       mode,
       entityCount: entities.length,
-      entities,                    // FULL LIST – use this in your map/app
-      sample: entities.slice(0, 3) // small sample for your smoke test, if you like
+      entities,                  // FULL list (use this in the app)
+      sample: entities.slice(0,3) // tiny preview if you still show it
     });
   } catch (err) {
     console.error('trip-updates error:', err);
