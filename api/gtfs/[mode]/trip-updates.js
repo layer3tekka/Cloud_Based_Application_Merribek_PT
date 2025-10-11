@@ -1,11 +1,13 @@
+// api/gtfs/[mode]/trip-updates.js
+
 // ESM-friendly import for a CommonJS module:
 import gtfs from "gtfs-realtime-bindings";
 const { transit_realtime: tr } = gtfs;
 
 export const config = { runtime: "nodejs" };
 
-// map url segment to PTV segment
-const FEED_SEGMENT = { tram: "tram", bus: "bus", train: "metro" };
+// Map URL segment to PTV segment (NOTE: tram -> yarratrams)
+const FEED_SEGMENT = { tram: "yarratrams", bus: "bus", train: "metro" };
 
 function getMode(req) {
   const seg =
@@ -23,18 +25,25 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
 
   const mode = getMode(req);
-  if (!mode) return res.status(400).json({ ok: false, error: "Invalid mode. Use tram|bus|train" });
+  if (!mode) {
+    return res.status(400).json({ ok: false, error: "Invalid mode. Use tram|bus|train" });
+  }
 
   const key = process.env.PTV_KEY;
-  if (!key) return res.status(500).json({ ok: false, error: "Missing PTV_KEY env var" });
+  if (!key) {
+    return res.status(500).json({ ok: false, error: "Missing PTV_KEY env var" });
+  }
 
-  // Use your working header name. If 401/403 occurs, try "Ocp-Apim-Subscription-Key"
-  const headerName = process.env.PTV_HEADER || "KeyId";
-
+  // Use the official PTV subscription header (don’t rely on an env override).
   const url = `https://api.opendata.transport.vic.gov.au/opendata/public-transport/gtfs/realtime/v1/${FEED_SEGMENT[mode]}/trip-updates`;
 
   try {
-    const resp = await fetch(url, { headers: { [headerName]: key, Accept: "*/*" } });
+    const resp = await fetch(url, {
+      headers: {
+        "Ocp-Apim-Subscription-Key": key,
+        "Accept": "*/*"
+      }
+    });
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
@@ -43,7 +52,7 @@ export default async function handler(req, res) {
         upstreamStatus: resp.status,
         upstreamCT: resp.headers.get("content-type"),
         bodyPreview: text.slice(0, 400),
-        hint: "If 401/403, set env PTV_HEADER=Ocp-Apim-Subscription-Key and redeploy."
+        hint: "401/MessageBlocked usually means missing/invalid key or product not enabled for your key."
       });
     }
 
@@ -61,11 +70,16 @@ export default async function handler(req, res) {
       });
     }
 
+    // Convert to a JSON-friendly object
     const obj = tr.FeedMessage.toObject(msg, { longs: Number, enums: String, defaults: true });
+
+    // Return ALL trips (entities) + a small sample for smoke tests
+    res.setHeader("Cache-Control", "public, max-age=0, must-revalidate");
     return res.status(200).json({
       ok: true,
       mode,
       entityCount: obj.entity?.length || 0,
+      entities: obj.entity || [],
       sample: (obj.entity || []).slice(0, 3)
     });
   } catch (err) {
