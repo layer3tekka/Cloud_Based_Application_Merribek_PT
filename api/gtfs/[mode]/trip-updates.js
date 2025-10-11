@@ -1,74 +1,81 @@
-// ESM-friendly import for a CommonJS module:
-import gtfs from "gtfs-realtime-bindings";
-const { transit_realtime: tr } = gtfs;
-
-export const config = { runtime: "nodejs" };
-
-// map url segment to PTV segment
-const FEED_SEGMENT = { tram: "tram", bus: "bus", train: "metro" };
-
-function getMode(req) {
-  const seg =
-    req.query?.mode ||
-    new URL(req.url, `http://${req.headers.host}`).pathname.split("/")[3];
-  const key = String(seg || "").toLowerCase();
-  return FEED_SEGMENT[key] ? key : null;
-}
+// api/gtfs/[mode]/trip-updates.js
+import fetch from 'node-fetch';
+import pkg from 'gtfs-realtime-bindings';
+const { transit_realtime: tr } = pkg;
 
 export default async function handler(req, res) {
-  // CORS
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.status(200).end();
-
-  const mode = getMode(req);
-  if (!mode) return res.status(400).json({ ok: false, error: "Invalid mode. Use tram|bus|train" });
-
-  const key = process.env.PTV_KEY;
-  if (!key) return res.status(500).json({ ok: false, error: "Missing PTV_KEY env var" });
-
-  // Use your working header name. If 401/403 occurs, try "Ocp-Apim-Subscription-Key"
-  const headerName = process.env.PTV_HEADER || "KeyId";
-
-  const url = `https://api.opendata.transport.vic.gov.au/opendata/public-transport/gtfs/realtime/v1/${FEED_SEGMENT[mode]}/trip-updates`;
-
   try {
-    const resp = await fetch(url, { headers: { [headerName]: key, Accept: "*/*" } });
+    const mode =
+      req.query?.mode ||
+      new URL(req.url, `http://${req.headers.host}`).pathname.split("/")[3];
 
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      return res.status(resp.status).json({
-        ok: false,
-        upstreamStatus: resp.status,
-        upstreamCT: resp.headers.get("content-type"),
-        bodyPreview: text.slice(0, 400),
-        hint: "If 401/403, set env PTV_HEADER=Ocp-Apim-Subscription-Key and redeploy."
-      });
-    }
+    const base = 'https://api.opendata.transport.vic.gov.au/opendata/public-transport/gtfs/realtime/v1';
+    const path = mode === 'tram'  ? 'yarratrams/trip-updates'
+               : mode === 'bus'   ? 'bus/trip-updates'
+               :                    'metro/trip-updates'; // train
 
-    const buf = Buffer.from(await resp.arrayBuffer());
-    let msg;
-    try {
-      msg = tr.FeedMessage.decode(buf);
-    } catch (e) {
-      return res.status(502).json({
-        ok: false,
-        error: "DECODE_FAILED",
-        message: e?.message || String(e),
-        contentType: resp.headers.get("content-type"),
-        byteLength: buf.length
-      });
-    }
+    const key = process.env.PTV_KEY;
+    if (!key) return res.status(500).json({ ok:false, error:'Missing PTV_KEY env var' });
 
-    const obj = tr.FeedMessage.toObject(msg, { longs: Number, enums: String, defaults: true });
-    return res.status(200).json({
+    const r = await fetch(`${base}/${path}`, {
+      headers: { 'Ocp-Apim-Subscription-Key': key }
+    });
+    if (!r.ok) return res.status(r.status).json({ ok:false, error:`Upstream ${r.status}` });
+
+    const buf = await r.arrayBuffer();
+    const feed = tr.FeedMessage.decode(new Uint8Array(buf));
+    const entities = (feed.entity || []).map(e => {
+      // make a small, JSON-friendly object the client can use without ProtoBufs
+      const tu = e.tripUpdate;
+      const stopTimeUpdate = (tu?.stopTimeUpdate || []).map(u => ({
+        stopSequence: u.stopSequence,
+        stopId: u.stopId?.toString(),
+        arrival: {
+          delay: u.arrival?.delay ?? 0,
+          time:  Number(u.arrival?.time ?? 0),
+          uncertainty: u.arrival?.uncertainty ?? 0
+        },
+        departure: {
+          delay: u.departure?.delay ?? 0,
+          time:  Number(u.departure?.time ?? 0),
+          uncertainty: u.departure?.uncertainty ?? 0
+        },
+        scheduleRelationship: u.scheduleRelationship ?? 'SCHEDULED'
+      }));
+
+      return {
+        id: e.id,
+        isDeleted: !!e.isDeleted,
+        tripUpdate: {
+          stopTimeUpdate,
+          trip: {
+            tripId: tu?.trip?.tripId,
+            startTime: tu?.trip?.startTime,
+            startDate: tu?.trip?.startDate,
+            scheduleRelationship: tu?.trip?.scheduleRelationship ?? 'SCHEDULED',
+            routeId: tu?.trip?.routeId,
+            directionId: tu?.trip?.directionId ?? null
+          },
+          vehicle: tu?.vehicle ?? null,
+          timestamp: Number(tu?.timestamp ?? 0),
+          delay: tu?.delay ?? 0,
+          tripProperties: tu?.tripProperties ?? null
+        },
+        vehicle: e.vehicle ?? null,
+        alert: e.alert ?? null
+      };
+    });
+
+    res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
+    res.status(200).json({
       ok: true,
       mode,
-      entityCount: obj.entity?.length || 0,
-      sample: (obj.entity || []).slice(0, 3)
+      entityCount: entities.length,
+      entities,                      // <- full list for the app
+      sample: entities.slice(0, 3)   // <- short sample for your smoke-test page
     });
   } catch (err) {
-    return res.status(500).json({ ok: false, error: "FETCH_FAILED", message: err?.message || String(err) });
+    console.error(err);
+    res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 }
