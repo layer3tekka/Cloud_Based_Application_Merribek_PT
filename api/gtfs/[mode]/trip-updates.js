@@ -8,7 +8,7 @@ const { transit_realtime: tr } = gtfs;
 export const config = { runtime: "nodejs" }; // NOT "edge", NOT "nodejs20.x"
 
 // Map URL segment to the PTV product segment
-const FEED_SEGMENT = { tram: "yarratrams", bus: "bus", train: "metro" };
+const FEED_SEGMENT = { tram: "tram", bus: "bus", train: "metro" };
 
 function getMode(req) {
   const seg =
